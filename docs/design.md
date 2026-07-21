@@ -224,3 +224,25 @@ are declared via `uv add`. A future prototype would split into modules:
 
 Likely `uv add` dependencies: `anthropic`, `networkx`, an embedding lib, document parsers
 (`pypdf`/`python-docx`), and a graph store client when moving beyond the in-memory prototype.
+
+
+---
+
+How will knowledge graph be accessed - tool or skill?
+
+Knowledge graph - networkx
+
+function to navigate graph and give prompt to the LLM
+This function is Classify tool
+
+Classify tool should be part of MCP
+
+F1 - read graph
+F2- reduce edges
+F3- eliminate elements we dont want to pull
+F4- Augment/calculation
+
+
+MCP + LLM
+
+Breakdown to Semantic context -> convert to Markdown -> RDF -> RDF knowledge graph -> Graphical search -> Connect to MCP server + tool
