@@ -1,12 +1,18 @@
 """Minimal Streamlit frontend for the policy knowledge graph."""
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import networkx as nx
 import streamlit as st
+
+# Make the repo root importable regardless of the working directory Streamlit
+# was launched from (fixes "ModuleNotFoundError: No module named 'src'" when
+# running from inside frontend/ instead of the repo root).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # ponytail: import backend modules directly instead of wiring an MCP client
 from src.extraction import SemanticContext, extract_semantic_context
