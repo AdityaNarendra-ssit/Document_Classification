@@ -1,20 +1,18 @@
-"""Minimal Streamlit frontend for the policy knowledge graph."""
+"""Streamlit frontend — multi-policy automated pipeline."""
 
 import os
 import sys
 import tempfile
 from pathlib import Path
+from datetime import datetime
 
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import networkx as nx
 import streamlit as st
 
-# Make the repo root importable regardless of the working directory Streamlit
-# was launched from (fixes "ModuleNotFoundError: No module named 'src'" when
-# running from inside frontend/ instead of the repo root).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# ponytail: import backend modules directly instead of wiring an MCP client
 from src.extraction import SemanticContext, extract_semantic_context
 from src.graph_store import KnowledgeGraph
 from src.ingestion import to_markdown
@@ -25,142 +23,205 @@ st.title("Policy Knowledge Graph")
 # Shared state
 if "kg" not in st.session_state:
     st.session_state.kg = KnowledgeGraph()
-if "markdown" not in st.session_state:
-    st.session_state.markdown = ""
-if "context" not in st.session_state:
-    st.session_state.context = None
+if "policies" not in st.session_state:
+    # list of dicts: {policy_id, version, title, markdown, context, added_at}
+    st.session_state.policies = []
+if "subgraph" not in st.session_state:
+    st.session_state.subgraph = None
 
 
-tab_ingest, tab_build, tab_explore = st.tabs(["1. Ingest", "2. Build Graph", "3. Explore Graph"])
+def run_visualization(sub):
+    type_color = {
+        "Policy": "#4C72B0",
+        "PolicyRule": "#55A868",
+        "DataCategory": "#DD8452",
+        "Partner": "#8172B2",
+        "NDAContract": "#C44E52",
+        "ClassificationLabel": "#CCB974",
+    }
+    n_nodes = len(sub.nodes)
+    if n_nodes == 0:
+        st.info("No nodes to display.")
+        return
+    fig_size = max(14, min(n_nodes * 1.2, 30))
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.7))
 
+    try:
+        pos = nx.kamada_kawai_layout(sub.to_undirected())
+    except Exception:
+        pos = nx.spring_layout(sub.to_undirected(), seed=42, k=3.0 / max(n_nodes ** 0.5, 1))
 
-with tab_ingest:
-    st.header("Convert document to Markdown")
-    source_input = st.text_area("Or paste raw text / markdown here", height=200, key="raw_input")
-    uploaded = st.file_uploader("Or upload a file", type=["txt", "md", "pdf", "docx"])
+    labels = {n: sub.nodes[n].get("label", n.split("/")[-1].replace("_", " ")) for n in sub.nodes}
+    labels = {n: (v[:20] + "…") if len(v) > 20 else v for n, v in labels.items()}
+    node_colors = [type_color.get(sub.nodes[n].get("type"), "#999999") for n in sub.nodes]
 
-    if st.button("Convert"):
-        if uploaded:
-            suffix = Path(uploaded.name).suffix
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded.getvalue())
-                tmp_path = tmp.name
-            st.session_state.markdown = to_markdown(tmp_path)
-            os.unlink(tmp_path)
-        elif source_input:
-            st.session_state.markdown = to_markdown(source_input)
-        else:
-            st.warning("Provide text or a file.")
-
-    if st.session_state.markdown:
-        st.subheader("Markdown Output")
-        st.markdown(st.session_state.markdown)
-        st.download_button("Download markdown", st.session_state.markdown, "policy.md")
-
-
-with tab_build:
-    st.header("Extract semantic context and upsert to graph")
-    md_input = st.text_area(
-        "Markdown policy",
-        value=st.session_state.markdown,
-        height=250,
-        key="build_md",
+    nx.draw_networkx_nodes(sub, pos, node_color=node_colors, ax=ax, node_size=1800, alpha=0.92)
+    nx.draw_networkx_labels(sub, pos, labels, ax=ax, font_size=7, font_color="white", font_weight="bold")
+    nx.draw_networkx_edges(
+        sub, pos, ax=ax, arrows=True, arrowstyle="-|>", arrowsize=18,
+        edge_color="#888888", width=1.2, connectionstyle="arc3,rad=0.1",
+        min_source_margin=25, min_target_margin=25,
     )
-    col1, col2 = st.columns(2)
-    with col1:
-        policy_id = st.text_input("Policy ID", "POL-001")
-    with col2:
-        version = st.text_input("Version", "v1")
-
-    if st.button("Extract Context"):
-        if not md_input.strip():
-            st.warning("Paste markdown first.")
-        else:
-            with st.spinner("Calling Claude..."):
-                try:
-                    st.session_state.context = extract_semantic_context(md_input)
-                    st.success("Extraction complete")
-                except Exception as e:
-                    st.error(f"Extraction failed: {e}")
-
-    if st.session_state.context:
-        st.subheader("Extracted Context")
-        st.json(st.session_state.context.model_dump(mode="json"))
-
-        if st.button("Upsert to Graph"):
-            uri = st.session_state.kg.upsert_policy(st.session_state.context, policy_id, version)
-            st.success(f"Upserted {policy_id}@{version}")
-            st.write(f"Graph now has {len(st.session_state.kg.g.nodes)} nodes and {len(st.session_state.kg.g.edges)} edges")
-            st.json({"policy_uri": uri})
+    edge_labels = {(u, v): d.get("predicate", "") for u, v, d in sub.edges(data=True)}
+    nx.draw_networkx_edge_labels(
+        sub, pos, edge_labels=edge_labels, ax=ax, font_size=6, font_color="#444444",
+        bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.6, ec="none"),
+    )
+    legend_handles = [mpatches.Patch(color=c, label=t) for t, c in type_color.items()]
+    ax.legend(handles=legend_handles, loc="upper left", fontsize=8, framealpha=0.8)
+    ax.set_title("Knowledge Graph", fontsize=14, pad=20)
+    ax.axis("off")
+    plt.tight_layout()
+    st.pyplot(fig)
 
 
-with tab_explore:
-    st.header("Explore the knowledge graph")
-    st.write(f"Current graph: {len(st.session_state.kg.g.nodes)} nodes, {len(st.session_state.kg.g.edges)} edges")
+# ─────────────────────────────────────────────
+# SECTION 1: Upload & Process New Policy
+# ─────────────────────────────────────────────
+st.header("1. Add Policy")
 
-    seeds = st.text_input("Seed entities (comma separated)", "Acme, customerPII")
-    depth = st.slider("Depth", 1, 5, 2)
+source_input = st.text_area("Paste raw text / markdown here", height=150, key="raw_input")
+uploaded = st.file_uploader("Or upload a file", type=["txt", "md", "pdf", "docx"])
 
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    with col_f1:
-        run_f1 = st.button("F1 Read Graph")
-    with col_f2:
-        keep_edges = st.text_input("Keep edges", "governs, covers, mapsTo")
-        run_f2 = st.button("F2 Reduce Edges")
-    with col_f3:
-        min_degree = st.number_input("Min degree", min_value=0, value=1)
-        run_f3 = st.button("F3 Eliminate Nodes")
-    with col_f4:
-        scoring = st.selectbox("Scoring", ["hop_distance"])
-        run_f4 = st.button("F4 Augment")
+col1, col2 = st.columns(2)
+with col1:
+    policy_id = st.text_input("Policy ID", f"POL-{len(st.session_state.policies) + 1:03d}")
+with col2:
+    version = st.text_input("Version", "v1")
 
-    if run_f1:
-        seed_list = [s.strip() for s in seeds.split(",") if s.strip()]
-        sub = st.session_state.kg.read_graph(seed_list, depth)
-        st.session_state.subgraph = sub
+if st.button("➕ Convert & Extract & Add to Graph", type="primary"):
+    # Check duplicate policy ID
+    existing_ids = [p["policy_id"] for p in st.session_state.policies]
+    if policy_id in existing_ids:
+        st.error(f"Policy ID '{policy_id}' already exists. Use a different ID.")
+        st.stop()
 
-    sub = st.session_state.get("subgraph")
-    if sub is None and len(st.session_state.kg.g.nodes) > 0:
-        # ponytail: default to full graph if no subgraph yet
-        sub = st.session_state.kg.g.copy()
-        st.session_state.subgraph = sub
+    # Step 1: Convert
+    raw_md = ""
+    if uploaded:
+        suffix = Path(uploaded.name).suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded.getvalue())
+            tmp_path = tmp.name
+        raw_md = to_markdown(tmp_path)
+        os.unlink(tmp_path)
+    elif source_input.strip():
+        raw_md = to_markdown(source_input)
+    else:
+        st.warning("Provide text or upload a file first.")
+        st.stop()
 
-    if sub is not None:
+    st.success("✅ Step 1: Converted to Markdown")
+
+    # Step 2: Extract
+    with st.spinner("⏳ Step 2: Extracting semantic context with Claude..."):
+        try:
+            ctx = extract_semantic_context(raw_md)
+            st.success("✅ Step 2: Semantic context extracted")
+        except Exception as e:
+            st.error(f"Extraction failed: {e}")
+            st.stop()
+
+    # Step 3: Upsert to graph
+    with st.spinner("⏳ Step 3: Adding to knowledge graph..."):
+        try:
+            uri = st.session_state.kg.upsert_policy(ctx, policy_id, version)
+            st.session_state.subgraph = st.session_state.kg.g.copy()
+
+            # Save to policy list
+            st.session_state.policies.append({
+                "policy_id": policy_id,
+                "version": version,
+                "title": ctx.title or policy_id,
+                "markdown": raw_md,
+                "context": ctx,
+                "added_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            })
+            st.success(f"✅ Step 3: '{ctx.title or policy_id}' added! Graph now has {len(st.session_state.kg.g.nodes)} nodes, {len(st.session_state.kg.g.edges)} edges")
+        except Exception as e:
+            st.error(f"Graph build failed: {e}")
+            st.stop()
+
+st.divider()
+
+# ─────────────────────────────────────────────
+# SECTION 2: Policy List
+# ─────────────────────────────────────────────
+if st.session_state.policies:
+    st.header(f"2. Policies ({len(st.session_state.policies)})")
+
+    for i, policy in enumerate(st.session_state.policies):
+        with st.expander(
+            f"📋 [{policy['policy_id']}] {policy['title']}  —  {policy['version']}  ·  {policy['added_at']}",
+            expanded=False
+        ):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown(f"**Policy ID:** `{policy['policy_id']}`")
+                st.markdown(f"**Version:** `{policy['version']}`")
+                st.markdown(f"**Added:** {policy['added_at']}")
+            with col_b:
+                st.markdown(f"**Type:** {policy['context'].policy_type}")
+                st.markdown(f"**Effective Date:** {policy['context'].effective_date or 'N/A'}")
+                st.markdown(f"**Rules:** {len(policy['context'].rules)}  |  **Partners:** {len(policy['context'].partners)}")
+
+            inner_tab1, inner_tab2 = st.tabs(["📄 Markdown", "🧠 Extracted Context"])
+            with inner_tab1:
+                st.markdown(policy["markdown"])
+                st.download_button(
+                    "Download markdown",
+                    policy["markdown"],
+                    f"{policy['policy_id']}.md",
+                    key=f"dl_{i}"
+                )
+            with inner_tab2:
+                st.json(policy["context"].model_dump(mode="json"))
+
+    st.divider()
+
+# ─────────────────────────────────────────────
+# SECTION 3: Combined Knowledge Graph
+# ─────────────────────────────────────────────
+if st.session_state.subgraph is not None:
+    sub = st.session_state.subgraph
+    st.header("3. Combined Knowledge Graph")
+    st.write(f"**{len(sub.nodes)} nodes** across **{len(st.session_state.policies)} policies**")
+
+    with st.expander("⚙️ Graph Controls", expanded=False):
+        seeds = st.text_input("Seed entities (comma separated)", "")
+        depth = st.slider("Depth", 1, 5, 2)
+        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        with col_f1:
+            run_f1 = st.button("F1 Read Graph")
+        with col_f2:
+            keep_edges = st.text_input("Keep edges", "governs, covers, mapsTo")
+            run_f2 = st.button("F2 Reduce Edges")
+        with col_f3:
+            min_degree = st.number_input("Min degree", min_value=0, value=1)
+            run_f3 = st.button("F3 Eliminate Nodes")
+        with col_f4:
+            scoring = st.selectbox("Scoring", ["hop_distance"])
+            run_f4 = st.button("F4 Augment")
+
+        if run_f1:
+            seed_list = [s.strip() for s in seeds.split(",") if s.strip()]
+            sub = st.session_state.kg.read_graph(seed_list, depth)
+            st.session_state.subgraph = sub
         if run_f2:
             sub = st.session_state.kg.reduce_edges(sub, [e.strip() for e in keep_edges.split(",") if e.strip()])
+            st.session_state.subgraph = sub
         if run_f3:
             sub = st.session_state.kg.eliminate_nodes(sub, min_degree)
+            st.session_state.subgraph = sub
         if run_f4:
             seed_list = [s.strip() for s in seeds.split(",") if s.strip()]
             sub = st.session_state.kg.augment_graph(sub, seed_list, scoring)
+            st.session_state.subgraph = sub
 
-        st.session_state.subgraph = sub
-
-        st.subheader("Graph Data")
-        st.write(f"Nodes: {len(sub.nodes)}, Edges: {len(sub.edges)}")
+    with st.expander("📊 Graph Data", expanded=False):
         st.json({
             "nodes": [{"uri": n, **d} for n, d in sub.nodes(data=True)],
             "edges": [{"source": u, "target": v, **d} for u, v, d in sub.edges(data=True)],
         })
 
-        st.subheader("Visualization")
-        fig, ax = plt.subplots(figsize=(10, 8))
-        pos = nx.spring_layout(sub.to_undirected(), seed=42)
-        labels = {n: sub.nodes[n].get("label", n.split("/")[-1]) for n in sub.nodes}
-        node_colors = []
-        type_color = {
-            "Policy": "tab:blue",
-            "PolicyRule": "tab:green",
-            "DataCategory": "tab:orange",
-            "Partner": "tab:purple",
-            "NDAContract": "tab:red",
-            "ClassificationLabel": "tab:pink",
-        }
-        for n in sub.nodes:
-            node_colors.append(type_color.get(sub.nodes[n].get("type"), "tab:gray"))
-        nx.draw_networkx_nodes(sub, pos, node_color=node_colors, ax=ax, node_size=700)
-        nx.draw_networkx_labels(sub, pos, labels, ax=ax, font_size=8)
-        nx.draw_networkx_edges(sub, pos, ax=ax, arrows=True, edge_color="gray")
-        ax.set_title("Knowledge Graph Subgraph")
-        ax.axis("off")
-        st.pyplot(fig)
+    run_visualization(sub)

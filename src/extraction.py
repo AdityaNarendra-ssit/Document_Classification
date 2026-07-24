@@ -76,7 +76,6 @@ class SemanticContext(BaseModel):
 
 def _client() -> Anthropic:
     key = os.environ.get("ANTHROPIC_API_KEY")
-    print("key", key)
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY is required for semantic extraction")
     return Anthropic(api_key=key)
@@ -100,12 +99,6 @@ def extract_semantic_context(markdown: str, model: str = "claude-sonnet-4-6") ->
             text = block.text
             break
 
-        # TEMPORARY DEBUG - add these lines
-    print("=" * 60)
-    print("STOP REASON:", response.stop_reason)
-    print("RAW TEXT FROM CLAUDE:")
-    print(repr(text))
-    print("=" * 60)
 
     text = text.strip()
 
@@ -139,4 +132,4 @@ Version 1.2, effective 2025-01-01.
 """
     ctx = extract_semantic_context(sample)
     assert ctx.title
-    print(ctx.model_dump_json(indent=2))
+    # print(ctx.model_dump_json(indent=2))

@@ -170,7 +170,12 @@ class KnowledgeGraph:
 
     @staticmethod
     def _node_uri(name: str) -> str:
-        return str(EX[name.replace(" ", "_").replace("#", "").replace("/", "_")])
+        import re
+        # Replace spaces/slashes with underscores, strip all other non-URI-safe chars
+        safe = name.replace(" ", "_").replace("/", "_")
+        safe = re.sub(r'[^A-Za-z0-9_\-.]', '', safe)
+        safe = safe.strip("_.-") or "unknown"
+        return str(EX[safe])
 
 
 if __name__ == "__main__":
