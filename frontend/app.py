@@ -84,7 +84,7 @@ def run_visualization(sub):
     nx.draw_networkx_nodes(sub, pos, node_color=node_colors, ax=ax, node_size=1800, alpha=0.92)
     nx.draw_networkx_labels(sub, pos, labels, ax=ax, font_size=7, font_color="white", font_weight="bold")
     nx.draw_networkx_edges(
-        sub, pos, ax=ax, arrows=True, arrowstyle="-|+", arrowsize=18,
+        sub, pos, ax=ax, arrows=True, arrowstyle="->", arrowsize=18,
         edge_color="#888888", width=1.2, connectionstyle="arc3,rad=0.1",
         min_source_margin=25, min_target_margin=25,
     )
