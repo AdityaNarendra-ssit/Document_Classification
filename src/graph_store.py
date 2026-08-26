@@ -95,13 +95,8 @@ class KnowledgeGraph:
             self.g.add_node(uri, label=cat, type="DataCategory")
             self.g.add_edge(policy_uri, uri, predicate="governs")
 
-        for i, rule in enumerate(context.rules):
-            # Always use a short ID — never full rule text as URI
-            raw_id = rule.rule_id or ""
-            if not raw_id or len(raw_id) > 40 or " " in raw_id.strip():
-                rule_id = f"{policy_id}-rule-{i + 1}"
-            else:
-                rule_id = raw_id
+        for rule in context.rules:
+            rule_id = rule.rule_id or f"{policy_id}-rule-{id(rule)}"
             rule_uri = self._node_uri(rule_id)
             self.g.add_node(rule_uri, label=rule_id, type="PolicyRule", text=rule.text, version=version)
             self.g.add_edge(policy_uri, rule_uri, predicate="hasRule")
@@ -145,12 +140,23 @@ class KnowledgeGraph:
             for key, value in data.items():
                 if key in {"type"}:
                     continue
-                rdf.add((uri, EX[key], Literal(str(value))))
+                rdf.add((uri, EX[self._safe_uri_component(key)], Literal(str(value))))
         for u, v, data in self.g.edges(data=True):
             pred = data.get("predicate", "relatedTo")
-            rdf.add((URIRef(u), EX[pred], URIRef(v)))
+            rdf.add((URIRef(u), EX[self._safe_uri_component(pred)], URIRef(v)))
         return rdf
 
+    @staticmethod
+    def _safe_uri_component(value: str, max_len: int = 40) -> str:
+        """Guard against a predicate/key that isn't a valid URI component
+        (e.g. a relationship predicate coming back as a full sentence instead
+        of a short relation name) crashing Turtle serialization.
+        """
+        if " " in value or len(value) > max_len or not value.replace("_", "").isalnum():
+            from urllib.parse import quote
+            return quote(value.strip()[:max_len].replace(" ", "_"), safe="_")
+        return value
+    
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.to_rdf().serialize(destination=str(self.path), format="turtle")
@@ -175,14 +181,26 @@ class KnowledgeGraph:
 
     @staticmethod
     def _node_uri(name: str) -> str:
-        import re
-        # Truncate very long strings (e.g. rule text accidentally used as ID)
-        name = name[:80] if len(name) > 80 else name
-        # Replace spaces and slashes with underscores, strip all non-URI-safe chars
-        safe = name.replace(" ", "_").replace("/", "_")
-        safe = re.sub(r'[^A-Za-z0-9_\-.]', '', safe)
-        safe = safe.strip("_.-") or "unknown"
-        return str(EX[safe])
+        """Turn any entity name into a valid RDF node URI.
+
+        Extraction is supposed to produce short identifiers (category names,
+        partner names, rule ids) but on real-world documents Claude can
+        occasionally return a full descriptive sentence instead (seen with
+        both a relationship predicate and, now, a node identifier — e.g. an
+        NDA-scope data category coming back as a whole clause). Node names
+        containing commas/colons/periods/quotes broke Turtle serialization
+        even after spaces/#// were stripped, because those characters are
+        still invalid in a QName-safe local part. urlencode + truncate here
+        guarantees a valid URI regardless of what string comes in, so
+        upsert_policy() can never crash on this again, no matter which field
+        the bad text arrives through.
+        """
+        from urllib.parse import quote
+
+        cleaned = name.strip().replace(" ", "_")
+        if len(cleaned) > 60 or not cleaned.replace("_", "").isalnum():
+            cleaned = quote(cleaned[:60], safe="_")
+        return str(EX[cleaned])
 
 
 if __name__ == "__main__":

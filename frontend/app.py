@@ -4,6 +4,10 @@ This app provides a web UI for the policy knowledge graph. Users can paste or
 upload policy documents, extract semantic context with Claude, upsert policies
 into a combined knowledge graph, and visualize the graph with interactive
 Graph RAG controls (read, reduce, eliminate, augment).
+
+It also provides a document classification section: upload a target document,
+retrieve the relevant subgraph via Graph RAG, and get a structured sensitivity
+classification (Restricted / Confidential / Internal / Public) from Claude.
 """
 
 import os
@@ -23,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.extraction import SemanticContext, extract_semantic_context
 from src.graph_store import KnowledgeGraph
 from src.ingestion import to_markdown
+from src.context_assembler import assemble_prompt
+from src.classifier import classify
 
 st.set_page_config(page_title="Policy Knowledge Graph", layout="wide")
 st.title("Policy Knowledge Graph")
@@ -38,6 +44,10 @@ if "policies" not in st.session_state:
 if "subgraph" not in st.session_state:
     logger.info("Initializing session_state.subgraph")
     st.session_state.subgraph = None
+if "classifications" not in st.session_state:
+    logger.info("Initializing session_state.classifications")
+    # list of dicts: {doc_name, doc_text, seed_entities, result, classified_at}
+    st.session_state.classifications = []
 
 
 def run_visualization(sub):
@@ -100,6 +110,64 @@ def run_visualization(sub):
     plt.tight_layout()
     logger.info("Rendering matplotlib figure in Streamlit")
     st.pyplot(fig)
+
+
+LABEL_COLOR = {
+    "Restricted": "🔴",
+    "Confidential": "🟠",
+    "Internal": "🟡",
+    "Public": "🟢",
+}
+
+
+def render_classification_result(result: dict):
+    """Render a classification result dict returned by src.classifier.classify().
+
+    Args:
+        result: Dict matching the submit_classification tool schema.
+
+    Returns:
+        None
+    """
+    label = result.get("classification", "Unknown")
+    confidence = result.get("confidence", 0.0)
+    icon = LABEL_COLOR.get(label, "⚪")
+
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        st.markdown(f"### {icon} {label}")
+    with col_b:
+        st.metric("Confidence", f"{confidence:.0%}")
+
+    if result.get("needsHumanReview"):
+        st.warning("⚠️ Flagged for human review")
+
+    st.markdown("**Rationale**")
+    st.write(result.get("rationale", "—"))
+
+    col_c, col_d = st.columns(2)
+    with col_c:
+        st.markdown("**Cited Policy Refs**")
+        refs = result.get("citedPolicyRefs", [])
+        if refs:
+            for ref in refs:
+                st.markdown(f"- `{ref.get('id')}`" + (f" ({ref.get('version')})" if ref.get("version") else ""))
+        else:
+            st.markdown("_None_")
+    with col_d:
+        st.markdown("**Cited NDA Refs**")
+        ndas = result.get("citedNDARefs", [])
+        if ndas:
+            for nda in ndas:
+                st.markdown(f"- `{nda}`")
+        else:
+            st.markdown("_None_")
+
+    assumptions = result.get("assumptions", [])
+    if assumptions:
+        st.markdown("**Assumptions**")
+        for a in assumptions:
+            st.markdown(f"- {a}")
 
 
 # ─────────────────────────────────────────────
@@ -292,3 +360,108 @@ if st.session_state.subgraph is not None:
         })
 
     run_visualization(sub)
+
+    st.divider()
+
+# ─────────────────────────────────────────────
+# SECTION 4: Classify a Document
+# ─────────────────────────────────────────────
+st.header("4. Classify a Document")
+
+if not st.session_state.policies:
+    st.info("Add at least one policy above before classifying a document — "
+             "the classifier needs graph context (partners, data categories, rules) to work against.")
+else:
+    doc_input = st.text_area("Paste the document text to classify", height=150, key="classify_raw_input")
+    doc_uploaded = st.file_uploader(
+        "Or upload a document file", type=["txt", "md", "pdf", "docx"], key="classify_file_uploader"
+    )
+
+    if st.button("🔍 Classify Document", type="primary"):
+        logger.info("Classify Document button clicked")
+
+        # Step 1: Convert to markdown (reuse the same ingestion path as policies)
+        doc_text = ""
+        doc_name = "pasted text"
+        if doc_uploaded:
+            suffix = Path(doc_uploaded.name).suffix
+            doc_name = doc_uploaded.name
+            logger.info("Document uploaded for classification: {} (suffix: {})", doc_name, suffix)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(doc_uploaded.getvalue())
+                tmp_path = tmp.name
+            doc_text = to_markdown(tmp_path)
+            os.unlink(tmp_path)
+            logger.info("Converted document to markdown ({} characters)", len(doc_text))
+        elif doc_input.strip():
+            logger.info("Using pasted document text ({} characters)", len(doc_input))
+            doc_text = to_markdown(doc_input)
+        else:
+            logger.warning("No document provided for classification")
+            st.warning("Provide text or upload a file first.")
+            st.stop()
+
+        st.success("✅ Step 1: Document converted to Markdown")
+
+        # Step 2: Assemble the Graph RAG prompt (find seeds -> traverse -> build context block)
+        with st.spinner("⏳ Step 2: Retrieving relevant policy context from the graph..."):
+            logger.info("Assembling classification prompt via context_assembler")
+            try:
+                prompt = assemble_prompt(st.session_state.kg, doc_text)
+                logger.info(
+                    "Prompt assembled: {} seed entities found: {}",
+                    len(prompt["seed_entities"]),
+                    prompt["seed_entities"],
+                )
+                if prompt["seed_entities"]:
+                    st.success(f"✅ Step 2: Found {len(prompt['seed_entities'])} relevant entities: "
+                               f"{', '.join(prompt['seed_entities'])}")
+                else:
+                    st.warning("⚠️ Step 2: No known partners or data categories were mentioned in this "
+                               "document — classification will be flagged for human review.")
+            except Exception as e:
+                logger.exception("Context assembly failed")
+                st.error(f"Context assembly failed: {e}")
+                st.stop()
+
+        # Step 3: Call the classifier
+        with st.spinner("⏳ Step 3: Classifying with Claude..."):
+            logger.info("Calling classifier.classify()")
+            try:
+                result = classify(prompt)
+                logger.info(
+                    "Classification complete: {} (confidence={}, needsHumanReview={})",
+                    result.get("classification"),
+                    result.get("confidence"),
+                    result.get("needsHumanReview"),
+                )
+                st.success("✅ Step 3: Classification complete")
+            except Exception as e:
+                logger.exception("Classification failed")
+                st.error(f"Classification failed: {e}")
+                st.stop()
+
+        # Save to history
+        st.session_state.classifications.append({
+            "doc_name": doc_name,
+            "doc_text": doc_text,
+            "seed_entities": prompt["seed_entities"],
+            "result": result,
+            "classified_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+
+        st.divider()
+        st.subheader("Result")
+        render_classification_result(result)
+
+    # History of past classifications this session
+    if st.session_state.classifications:
+        st.divider()
+        with st.expander(f"🕓 Classification history ({len(st.session_state.classifications)})", expanded=False):
+            for i, entry in enumerate(reversed(st.session_state.classifications)):
+                label = entry["result"].get("classification", "Unknown")
+                icon = LABEL_COLOR.get(label, "⚪")
+                with st.expander(f"{icon} {entry['doc_name']} — {label} · {entry['classified_at']}", expanded=False):
+                    render_classification_result(entry["result"])
+                    st.markdown("**Seed entities detected**")
+                    st.write(", ".join(entry["seed_entities"]) or "_None_")
